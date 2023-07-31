@@ -12,5 +12,8 @@ https://tarini.di.unimi.it/teaching/masterGameDev2023/final_assignment.txt
 6. Copiare il file .dll contenuto nella cartella bin
 7. Incollarlo nell cartella "BakingSkeletalAnimation/x64/Debug/"
 
+## Project output location
+L'output .obj si trova sotto la cartella BakingSkeletalAnimation/Mesh/
+
 ## Project output
 ![render](/IMGS/Render.png)
