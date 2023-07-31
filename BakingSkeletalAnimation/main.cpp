@@ -1,7 +1,13 @@
 #include <iostream>
+#include <fstream>
+#include <vector>
 #include <assimp/Importer.hpp>
 #include <assimp/scene.h>
 #include <assimp/postprocess.h>
+
+void writeMeshToObj(const aiMesh* mesh, std::ofstream& outputFile);
+aiQuaternion interpolateRotation(float animationTime, const aiNodeAnim* nodeAnim);
+void applyPoseToMeshesInScene(const aiScene* scene, const aiAnimation* animation, float animationTime);
 
 int main() {
     // Inizializza l'importer di Assimp
@@ -16,42 +22,117 @@ int main() {
         return -1;
     }
 
-    // La struttura di scena ha un solo nodo radice che contiene tutte le informazioni
-    aiNode* rootNode = scene->mRootNode;
+    // Seleziona la prima animazione dalla scena
+    aiAnimation* animation = scene->mAnimations[0];
 
-    // Seleziona la prima mesh trovata nella scena
-    aiMesh* mesh = scene->mMeshes[0];
+    // Dopo aver caricato l'animazione
+    std::cout << "Numero di canali animati: " << animation->mNumChannels << std::endl;
+    for (unsigned int i = 0; i < animation->mNumChannels; i++) {
+        aiNodeAnim* channel = animation->mChannels[i];
+        std::cout << "Canale " << i << " - Nome nodo: " << channel->mNodeName.C_Str() << std::endl;
+    }
 
-    // Leggi le informazioni della mesh skinnata
-    // I dati sui pesi delle ossa e sugli indici delle ossa associati a ciascun vertice sono contenuti nella mesh
-    aiVector3D* positions = mesh->mVertices; // Array delle posizioni dei vertici
-    aiVector3D* normals = mesh->mNormals; // Array delle normali dei vertici
-    aiVector3D* tangents = mesh->mTangents; // Array delle tangenti dei vertici
-    aiVector3D* bitangents = mesh->mBitangents; // Array delle bitangenti dei vertici
+    // Seleziona il frame desiderato (es. frame 10)
+    float desiredTime = 25.0f;
 
-    // Leggi i dati dello skinning della mesh
-    // I dati relativi alle ossa sono contenuti nella scena e devono essere associati ai vertici corrispondenti
-    aiBone** bones = mesh->mBones; // Array delle ossa associate alla mesh
-    unsigned int numBones = mesh->mNumBones; // Numero di ossa associate alla mesh
+    // Applica la posa a tutte le mesh nella scena
+    applyPoseToMeshesInScene(scene, animation, desiredTime);
 
-    // Itera sulle ossa associate alla mesh e ottieni i dati sui pesi e sugli indici delle ossa per ciascun vertice
-    for (unsigned int i = 0; i < numBones; i++) {
-        aiBone* bone = bones[i];
-        std::string boneName = bone->mName.C_Str();
+    // Scrivi la mesh risultante in formato OBJ
+    std::ofstream outputFile("Mesh/OutputMesh.obj");
+    if (!outputFile.is_open()) {
+        std::cout << "Impossibile aprire il file OutputMesh.obj per la scrittura." << std::endl;
+        return -1;
+    }
 
-        for (unsigned int j = 0; j < bone->mNumWeights; j++) {
-            aiVertexWeight vertexWeight = bone->mWeights[j];
-            unsigned int vertexIndex = vertexWeight.mVertexId;
-            float weight = vertexWeight.mWeight;
-            std::cout << "vertexIndex: " << vertexIndex << std::endl;
-            std::cout << "weight: " << weight << std::endl;
+    // Scrivi la mesh del primo frame in formato OBJ
+    for (unsigned int i = 0; i < scene->mNumMeshes; i++) {
+        writeMeshToObj(scene->mMeshes[i], outputFile);
+    }
 
-            // Usa vertexIndex e weight per associare i dati dello skinning al vertice corrispondente
-            // Ad esempio, puoi mantenere un array di indici di ossa e pesi per ciascun vertice
+    // Chiudi il file
+    outputFile.close();
+
+    return 0;
+}
+
+void writeMeshToObj(const aiMesh* mesh, std::ofstream& outputFile) {
+    for (unsigned int i = 0; i < mesh->mNumVertices; i++) {
+        aiVector3D vertex = mesh->mVertices[i];
+        outputFile << "v " << vertex.x << " " << vertex.y << " " << vertex.z << std::endl;
+    }
+
+    for (unsigned int i = 0; i < mesh->mNumFaces; i++) {
+        aiFace face = mesh->mFaces[i];
+        if (face.mNumIndices != 3) {
+            std::cout << "Il formato OBJ supporta solo triangoli. La mesh contiene facce con " << face.mNumIndices << " vertici." << std::endl;
+            return;
+        }
+        outputFile << "f ";
+        for (unsigned int j = 0; j < face.mNumIndices; j++) {
+            outputFile << face.mIndices[j] + 1 << " "; // Gli indici OBJ partono da 1
+        }
+        outputFile << std::endl;
+    }
+}
+
+aiQuaternion interpolateRotation(float animationTime, const aiNodeAnim* nodeAnim) {
+    aiQuaternion rotation;
+    if (nodeAnim->mNumRotationKeys == 1) {
+        rotation = nodeAnim->mRotationKeys[0].mValue;
+    }
+    else {
+        unsigned int frameIndex = 0;
+        for (unsigned int i = 0; i < nodeAnim->mNumRotationKeys - 1; i++) {
+            if (animationTime < nodeAnim->mRotationKeys[i + 1].mTime) {
+                frameIndex = i;
+                break;
+            }
+        }
+        unsigned int nextFrameIndex = (frameIndex + 1) % nodeAnim->mNumRotationKeys;
+        float deltaTime = (float)(nodeAnim->mRotationKeys[nextFrameIndex].mTime - nodeAnim->mRotationKeys[frameIndex].mTime);
+        float factor = (animationTime - (float)nodeAnim->mRotationKeys[frameIndex].mTime) / deltaTime;
+        const aiQuaternion& startRotationQ = nodeAnim->mRotationKeys[frameIndex].mValue;
+        const aiQuaternion& endRotationQ = nodeAnim->mRotationKeys[nextFrameIndex].mValue;
+        aiQuaternion::Interpolate(rotation, startRotationQ, endRotationQ, factor);
+        rotation.Normalize();
+    }
+    return rotation;
+}
+
+void applyPoseToNode(aiNode* node, const aiMatrix4x4& parentTransform, const aiAnimation* animation, float animationTime) {
+    aiMatrix4x4 nodeTransform = node->mTransformation;
+
+    // Cerca il canale di animazione per il nodo corrente
+    aiNodeAnim* nodeAnim = nullptr;
+    for (unsigned int i = 0; i < animation->mNumChannels; i++) {
+        aiNodeAnim* channel = animation->mChannels[i];
+        if (channel->mNodeName == node->mName) {
+            nodeAnim = channel;
+            break;
         }
     }
 
-    // Fai altre operazioni con i dati della mesh, ad esempio, calcola le pose o esegui il rendering della mesh
+    if (nodeAnim) {
+        // Applica la posa al nodo utilizzando l'animazione interpolata per la rotazione
+        aiQuaternion rotationQ = interpolateRotation(animationTime, nodeAnim);
+        aiMatrix4x4 rotationMatrix = aiMatrix4x4(rotationQ.GetMatrix());
+        nodeTransform = rotationMatrix;
+    }
 
-    return 0;
+    // Calcola la trasformazione globale del nodo combinando la trasformazione del nodo corrente con quella del nodo padre
+    aiMatrix4x4 globalTransform = parentTransform * nodeTransform;
+
+    // Applica la trasformazione globale al nodo corrente
+    node->mTransformation = globalTransform;
+
+    // Applica ricorsivamente la posa a tutti i nodi figli
+    for (unsigned int i = 0; i < node->mNumChildren; i++) {
+        applyPoseToNode(node->mChildren[i], globalTransform, animation, animationTime);
+    }
+}
+
+void applyPoseToMeshesInScene(const aiScene* scene, const aiAnimation* animation, float animationTime) {
+    // Applica la posa a partire dalla radice dell'albero della scena
+    applyPoseToNode(scene->mRootNode, aiMatrix4x4(), animation, animationTime);
 }
