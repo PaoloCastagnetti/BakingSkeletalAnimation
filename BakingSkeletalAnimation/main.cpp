@@ -4,10 +4,12 @@
 #include <assimp/Importer.hpp>
 #include <assimp/scene.h>
 #include <assimp/postprocess.h>
+#include <assimp/matrix4x4.h>
 
 void writeMeshToObj(const aiMesh* mesh, std::ofstream& outputFile);
 aiMatrix4x4 interpolateTransformation(float animationTime, const aiNodeAnim* nodeAnim);
-void applyPoseToMesh(const aiMesh* mesh, const aiAnimation* animation, float animationTime);
+void applyPoseToMesh(const aiMesh* mesh, const aiAnimation* animation, float animationTime, const aiScene* scene);
+aiMatrix4x4 calculateGlobalTransformations(const aiNode* node, const aiAnimation* animation, float animationTime, const aiScene* scene);
 
 int main() {
     // Inizializza l'importer di Assimp
@@ -15,7 +17,7 @@ int main() {
 
     // Specifica le opzioni di importazione, in questo caso, vogliamo caricare i dati relativi alle ossa
     unsigned int importFlags = aiProcess_Triangulate | aiProcess_GenSmoothNormals | aiProcess_FlipUVs | aiProcess_LimitBoneWeights;
-    const aiScene* scene = importer.ReadFile("Mesh/AnimatedSkeletalMesh.fbx", importFlags);
+    const aiScene* scene = importer.ReadFile("Mesh/AnimatedSkeletalMeshASCII.fbx", importFlags);
 
     if (!scene || scene->mFlags & AI_SCENE_FLAGS_INCOMPLETE || !scene->mRootNode) {
         std::cout << "Errore durante il caricamento della mesh skinnata: " << importer.GetErrorString() << std::endl;
@@ -26,11 +28,11 @@ int main() {
     aiAnimation* animation = scene->mAnimations[0];
 
     // Seleziona il frame desiderato (es. frame 10)
-    float desiredTime = 10.0f;
+    float desiredTime = 0.0f;
 
     // Applica la posa a tutte le mesh nella scena
     for (unsigned int i = 0; i < scene->mNumMeshes; i++) {
-        applyPoseToMesh(scene->mMeshes[i], animation, desiredTime);
+        applyPoseToMesh(scene->mMeshes[i], animation, desiredTime, scene);
     }
 
     // Scrivi la mesh risultante in formato OBJ
@@ -163,53 +165,63 @@ aiMatrix4x4 interpolateTransformation(float animationTime, const aiNodeAnim* nod
     return transformation;
 }
 
-void applyPoseToMesh(const aiMesh* mesh, const aiAnimation* animation, float animationTime) {
+void applyPoseToMesh(const aiMesh* mesh, const aiAnimation* animation, float animationTime, const aiScene* scene) {
+    if (!mesh->HasBones()) {
+        // La mesh non ha ossa, quindi non c'è bisogno di applicare una posa.
+        return;
+    }
+
+    aiMatrix4x4 globalTransformation = calculateGlobalTransformations(scene->mRootNode, animation, animationTime, scene);
+
     for (unsigned int i = 0; i < mesh->mNumVertices; i++) {
         aiVector3D vertex = mesh->mVertices[i];
         aiVector3D normal = mesh->mNormals ? mesh->mNormals[i] : aiVector3D(0.0f, 0.0f, 0.0f);
 
         // Applica la posa al vertice e alla normale utilizzando le trasformazioni degli ossi associati al vertice
-        aiVector3D transformedVertex(0.0f, 0.0f, 0.0f);
-        aiVector3D transformedNormal(0.0f, 0.0f, 0.0f);
+        aiVector3D transformedVertex = globalTransformation * vertex;
+        aiVector3D transformedNormal = globalTransformation * normal;
 
-        // Trasformazione totale dell'ossatura per il vertice corrente
-        aiMatrix4x4 totalTransformation;
+        // Applica la traslazione e lo scaling della mesh
+        aiVector3D translation = mesh->mVertices[i] - transformedVertex;
+        transformedVertex += translation;
 
-        // Cicla tra tutti gli ossi associati al vertice
-        for (unsigned int j = 0; j < mesh->mNumBones; j++) {
-            aiBone* bone = mesh->mBones[j];
-            aiMatrix4x4 boneMatrix = bone->mOffsetMatrix;
-
-            // Trova il canale di animazione corrispondente al nome dell'osso
-            aiNodeAnim* nodeAnim = nullptr;
-            for (unsigned int k = 0; k < animation->mNumChannels; k++) {
-                aiNodeAnim* channel = animation->mChannels[k];
-                if (channel->mNodeName == bone->mName) {
-                    nodeAnim = channel;
-                    break;
-                }
-            }
-
-            if (nodeAnim) {
-                // Calcola la trasformazione finale dell'osso interpolando le trasformazioni di rotazione, scaling e translation
-                aiMatrix4x4 boneTransformation = interpolateTransformation(animationTime, nodeAnim);
-
-                // Moltiplica la trasformazione dell'osso con la matrice di offset
-                boneTransformation *= boneMatrix;
-
-                // Aggiungi la trasformazione dell'osso alla trasformazione totale usando l'operatore di moltiplicazione
-                totalTransformation = boneTransformation * totalTransformation;
-            }
+        if (mesh->mNormals) {
+            transformedNormal.Normalize(); // Normalize again after applying the translation
         }
-
-        // Applica la trasformazione totale al vertice e alla normale
-        transformedVertex = totalTransformation * vertex;
-        transformedNormal = totalTransformation * normal;
 
         // Assegna il vertice trasformato alla mesh
         mesh->mVertices[i] = transformedVertex;
         if (mesh->mNormals) {
-            mesh->mNormals[i] = transformedNormal.Normalize();
+            mesh->mNormals[i] = transformedNormal;
         }
     }
+}
+
+aiMatrix4x4 calculateGlobalTransformations(const aiNode* node, const aiAnimation* animation, float animationTime, const aiScene* scene) {
+    aiMatrix4x4 globalTransformation;
+
+    const aiNodeAnim* nodeAnim = nullptr;
+    for (unsigned int i = 0; i < animation->mNumChannels; i++) {
+        if (animation->mChannels[i]->mNodeName == node->mName) {
+            nodeAnim = animation->mChannels[i];
+            break;
+        }
+    }
+
+    if (nodeAnim) {
+        globalTransformation = interpolateTransformation(animationTime, nodeAnim);
+    }
+    else {
+        globalTransformation = node->mTransformation;
+    }
+
+    for (unsigned int i = 0; i < node->mNumChildren; i++) {
+        const aiNode* childNode = node->mChildren[i];
+        if (childNode) {
+            aiMatrix4x4 childTransform = calculateGlobalTransformations(childNode, animation, animationTime, scene);
+            globalTransformation *= childTransform;
+        }
+    }
+
+    return globalTransformation;
 }
